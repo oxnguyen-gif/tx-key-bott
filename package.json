@@ -1,0 +1,11 @@
+{
+  "name": "tx-key-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": { "start": "node bot.js" },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "better-sqlite3": "^11.3.0"
+  },
+  "engines": { "node": ">=18" }
+}
