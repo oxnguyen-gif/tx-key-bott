@@ -1,9 +1,15 @@
 const TelegramBot = require('node-telegram-bot-api');
 const crypto = require('crypto');
 const fs = require('fs');
+const express = require('express');
 
 const CONFIG = {
+  // ⬇️ DÁN TOKEN BOT TELEGRAM VÀO ĐÂY
   TOKEN: '8668149255:AAHe4md2Meu4ZJK6u32RmKWQEVSIYqa7cak',
+
+  // ⬇️ DÁN API KEY SEPAY VÀO ĐÂY (dùng để xác thực webhook)
+  SEPAY_API_KEY: 'TTXATMQIWRNN9GPCSHM5D1UG1YZRI0YLFNZZFJHKGERDJKPPF8VTOWSMCSWSQFK3',
+
   ADMIN_USERNAME: 'Saligan2',
   ADMIN_CHAT_ID: 733030731,
   BANK: {
@@ -61,7 +67,6 @@ function genOrderCode(){
 }
 function fmtMoney(n){ return n.toLocaleString('vi-VN') + 'đ'; }
 
-// Tạo link QR VietQR
 function genQRUrl(amount, description){
   const bankCode = 'BIDV';
   const acc = CONFIG.BANK.ACCOUNT;
@@ -74,6 +79,126 @@ console.log('🤖 Đang khởi động bot...');
 const bot = new TelegramBot(CONFIG.TOKEN, { polling: true });
 console.log('✅ Bot sẵn sàng!');
 
+/* =========================================================
+   XỬ LÝ ĐƠN — TỰ ĐỘNG GỬI KEY KHI CÓ TIỀN
+   ========================================================= */
+function processOrderCompleted(order, source){
+  const key = generateKey(order.days);
+  order.status = 'completed';
+  order.key_generated = key;
+  order.paid_at = Date.now();
+  DB.stats.revenue += order.price;
+  DB.stats.orders += 1;
+  saveDB();
+
+  // Gửi key cho khách
+  bot.sendMessage(order.user_id,
+    `🎉 <b>ĐƠN HÀNG HOÀN THÀNH</b>\n\n` +
+    `📦 Sản phẩm: <b>${order.product_label}</b>\n` +
+    `🔑 Key của bạn:\n<code>${key}</code>\n\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `<b>Cách dùng:</b>\n` +
+    `1️⃣ Mở web: <b>https://tolmoimatto.netlify.app/</b>\n` +
+    `2️⃣ Nhập key vào ô kích hoạt\n` +
+    `3️⃣ Bấm KÍCH HOẠT\n\n` +
+    `⚠️ Đừng share key cho người khác.`,
+    { parse_mode: 'HTML' }
+  ).catch(e => console.log('Send key error:', e.message));
+
+  // Báo admin
+  bot.sendMessage(CONFIG.ADMIN_CHAT_ID,
+    `✅ <b>ĐƠN TỰ ĐỘNG HOÀN THÀNH</b>\n\n` +
+    `🆔 Mã đơn: <code>${order.code}</code>\n` +
+    `📦 Sản phẩm: <b>${order.product_label}</b>\n` +
+    `💰 Số tiền: <b>${fmtMoney(order.price)}</b>\n` +
+    `👤 Khách: @${order.username}\n` +
+    `🔑 Key: <code>${key}</code>\n` +
+    `📌 Nguồn: <b>${source}</b>`,
+    { parse_mode: 'HTML' }
+  ).catch(e => console.log('Send admin error:', e.message));
+
+  console.log('✅ Hoàn thành đơn', order.code, '| Key:', key);
+}
+
+/* =========================================================
+   WEBHOOK SEPAY — NHẬN THÔNG BÁO KHI CÓ TIỀN VÀO
+   ========================================================= */
+const app = express();
+app.use(express.json());
+
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'TX Key Bot' }));
+
+app.post('/sepay-webhook', (req, res) => {
+  console.log('🔔 Webhook SePay nhận được:', JSON.stringify(req.body));
+
+  // Xác thực API key (nếu SePay gửi Authorization header)
+  const auth = req.headers['authorization'] || '';
+  const expectedAuth = 'Apikey ' + CONFIG.SEPAY_API_KEY;
+  if (CONFIG.SEPAY_API_KEY && CONFIG.SEPAY_API_KEY !== 'PASTE_SEPAY_API_KEY'){
+    if (auth && auth !== expectedAuth){
+      console.log('❌ Webhook sai API key');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+
+  const body = req.body || {};
+  const content = String(body.content || body.description || body.transaction_content || '').toUpperCase();
+  const amount = Number(body.transferAmount || body.amount || 0);
+  const type = String(body.transferType || '').toLowerCase();
+
+  // Chỉ xử lý tiền vào
+  if (type && type !== 'in'){
+    console.log('⏭ Bỏ qua - không phải tiền vào');
+    return res.json({ ok: true, msg: 'ignored' });
+  }
+
+  // Tìm đơn hàng theo mã CK trong nội dung
+  let matched = null;
+  for (const order of DB.orders){
+    if (order.status !== 'pending' && order.status !== 'waiting') continue;
+    if (content.includes(order.code.toUpperCase())){
+      matched = order;
+      break;
+    }
+  }
+
+  if (!matched){
+    console.log('❌ Không tìm thấy đơn khớp. Content:', content);
+    // Thông báo admin có tiền vào nhưng không match
+    bot.sendMessage(CONFIG.ADMIN_CHAT_ID,
+      `⚠️ <b>CÓ TIỀN VÀO NHƯNG KHÔNG KHỚP ĐƠN</b>\n\n` +
+      `💰 Số tiền: <b>${fmtMoney(amount)}</b>\n` +
+      `📝 Nội dung: <code>${content}</code>`,
+      { parse_mode: 'HTML' }
+    ).catch(()=>{});
+    return res.json({ ok: true, msg: 'no_match' });
+  }
+
+  // Kiểm tra số tiền (cho phép sai lệch ±1000đ)
+  if (amount && Math.abs(amount - matched.price) > 1000){
+    console.log('❌ Sai số tiền. Đơn:', matched.price, 'Nhận:', amount);
+    bot.sendMessage(CONFIG.ADMIN_CHAT_ID,
+      `⚠️ <b>SAI SỐ TIỀN</b>\n\n` +
+      `🆔 Đơn: <code>${matched.code}</code>\n` +
+      `💰 Yêu cầu: <b>${fmtMoney(matched.price)}</b>\n` +
+      `💰 Nhận được: <b>${fmtMoney(amount)}</b>\n` +
+      `👤 Khách: @${matched.username}`,
+      { parse_mode: 'HTML' }
+    ).catch(()=>{});
+    return res.json({ ok: true, msg: 'wrong_amount' });
+  }
+
+  // Hoàn thành đơn
+  processOrderCompleted(matched, 'SePay Auto');
+  res.json({ ok: true, msg: 'completed', code: matched.code });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('🌐 Webhook server chạy port ' + PORT));
+
+/* =========================================================
+   BOT TELEGRAM
+   ========================================================= */
 bot.onText(/\/start/, (msg) => {
   const name = msg.from.first_name || 'bạn';
   bot.sendMessage(msg.chat.id,
@@ -119,6 +244,7 @@ bot.on('callback_query', async (query) => {
       `Nội dung CK: <code>${code}</code>\n` +
       `━━━━━━━━━━━━━━━━━━\n\n` +
       `📱 <b>Quét QR</b> bên trên để CK nhanh\n` +
+      `🤖 <b>Hệ thống tự động</b> gửi key sau khi nhận tiền (10-30 giây)\n` +
       `⚠️ <b>CK ĐÚNG nội dung</b> để bot nhận diện`;
 
     bot.sendPhoto(chatId, qrUrl, {
@@ -138,12 +264,17 @@ bot.on('callback_query', async (query) => {
     order.status = 'waiting';
     order.paid_at = Date.now();
     saveDB();
-    bot.sendMessage(chatId, `⏳ <b>Đã ghi nhận!</b>\n\nAdmin sẽ kiểm tra và gửi key trong <b>1-5 phút</b>.`, { parse_mode: 'HTML' });
+    bot.sendMessage(chatId,
+      `⏳ <b>Đã ghi nhận!</b>\n\n` +
+      `🤖 Hệ thống đang kiểm tra giao dịch.\n` +
+      `Nếu bạn đã CK đúng → key sẽ được gửi tự động trong <b>10-30 giây</b>.\n\n` +
+      `Nếu sau 5 phút chưa nhận được, IB admin @${CONFIG.ADMIN_USERNAME}`,
+      { parse_mode: 'HTML' });
 
     bot.sendMessage(CONFIG.ADMIN_CHAT_ID,
-      `🔔 <b>ĐƠN HÀNG MỚI</b>\n\n📦 Sản phẩm: <b>${order.product_label}</b>\n💰 Số tiền: <b>${fmtMoney(order.price)}</b>\n🆔 Mã đơn: <code>${order.code}</code>\n👤 Khách: @${order.username}\n\nKiểm tra TK → nếu có tiền → bấm ✅ XÁC NHẬN`,
+      `🔔 <b>KHÁCH BÁO ĐÃ CK</b>\n\n📦 Sản phẩm: <b>${order.product_label}</b>\n💰 Số tiền: <b>${fmtMoney(order.price)}</b>\n🆔 Mã đơn: <code>${order.code}</code>\n👤 Khách: @${order.username}\n\nHệ thống sẽ tự động xác nhận nếu SePay phát hiện tiền vào.`,
       { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
-        [{ text: '✅ XÁC NHẬN', callback_data: 'confirm_' + code }],
+        [{ text: '✅ XÁC NHẬN THỦ CÔNG', callback_data: 'confirm_' + code }],
         [{ text: '❌ HỦY', callback_data: 'cancel_' + code }]
       ]}});
   }
@@ -163,17 +294,7 @@ bot.on('callback_query', async (query) => {
     const order = DB.orders.find(o => o.code === code);
     if (!order) return bot.sendMessage(chatId, '❌ Không tìm thấy đơn.');
     if (order.status === 'completed') return bot.sendMessage(chatId, '⚠️ Đã xác nhận rồi.');
-
-    const key = generateKey(order.days);
-    order.status = 'completed';
-    order.key_generated = key;
-    DB.stats.revenue += order.price;
-    DB.stats.orders += 1;
-    saveDB();
-
-    bot.sendMessage(order.user_id,
-      `🎉 <b>ĐƠN HÀNG HOÀN THÀNH</b>\n\n📦 Sản phẩm: <b>${order.product_label}</b>\n🔑 Key của bạn:\n<code>${key}</code>\n\n━━━━━━━━━━━━━━━━━━\n<b>Cách dùng:</b>\n1️⃣ Mở web: <b>https://tolmoimatto.netlify.app/</b>\n2️⃣ Nhập key vào ô kích hoạt\n3️⃣ Bấm KÍCH HOẠT\n\n⚠️ Đừng share key cho người khác.`,
-      { parse_mode: 'HTML' });
+    processOrderCompleted(order, 'Admin thủ công');
     bot.sendMessage(chatId, `✅ Đã gửi key cho khách.`, { parse_mode: 'HTML' });
   }
   else if (data === 'support'){
