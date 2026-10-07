@@ -61,6 +61,15 @@ function genOrderCode(){
 }
 function fmtMoney(n){ return n.toLocaleString('vi-VN') + 'đ'; }
 
+// Tạo link QR VietQR
+function genQRUrl(amount, description){
+  const bankCode = 'MB'; // MBBank
+  const acc = CONFIG.BANK.ACCOUNT;
+  const name = encodeURIComponent(CONFIG.BANK.HOLDER);
+  const info = encodeURIComponent(description);
+  return 'https://img.vietqr.io/image/' + bankCode + '-' + acc + '-compact2.png?amount=' + amount + '&addInfo=' + info + '&accountName=' + name;
+}
+
 console.log('🤖 Đang khởi động bot...');
 const bot = new TelegramBot(CONFIG.TOKEN, { polling: true });
 console.log('✅ Bot sẵn sàng!');
@@ -96,13 +105,30 @@ bot.on('callback_query', async (query) => {
     DB.orders.push({ code, user_id: userId, username, product_id: product.id, product_label: product.label, price: product.price, days: product.days, status: 'pending', key_generated: null, created_at: Date.now() });
     saveDB();
 
-    bot.sendMessage(chatId,
-      `✅ <b>Đơn hàng đã tạo</b>\n\n📦 Sản phẩm: <b>${product.label}</b>\n💰 Số tiền: <b>${fmtMoney(product.price)}</b>\n\n━━━━━━━━━━━━━━━━━━\n<b>💳 THANH TOÁN:</b>\nNgân hàng: <b>${CONFIG.BANK.NAME}</b>\nSố TK: <code>${CONFIG.BANK.ACCOUNT}</code>\nChủ TK: <b>${CONFIG.BANK.HOLDER}</b>\nSố tiền: <b>${fmtMoney(product.price)}</b>\nNội dung CK: <code>${code}</code>\n━━━━━━━━━━━━━━━━━━\n\n⚠️ <b>CK ĐÚNG nội dung</b> để bot nhận diện.`,
-      { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
+    const qrUrl = genQRUrl(product.price, code);
+    const caption =
+      `✅ <b>Đơn hàng đã tạo</b>\n\n` +
+      `📦 Sản phẩm: <b>${product.label}</b>\n` +
+      `💰 Số tiền: <b>${fmtMoney(product.price)}</b>\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `<b>💳 THANH TOÁN:</b>\n` +
+      `Ngân hàng: <b>${CONFIG.BANK.NAME}</b>\n` +
+      `Số TK: <code>${CONFIG.BANK.ACCOUNT}</code>\n` +
+      `Chủ TK: <b>${CONFIG.BANK.HOLDER}</b>\n` +
+      `Số tiền: <b>${fmtMoney(product.price)}</b>\n` +
+      `Nội dung CK: <code>${code}</code>\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `📱 <b>Quét QR</b> bên trên để CK nhanh\n` +
+      `⚠️ <b>CK ĐÚNG nội dung</b> để bot nhận diện`;
+
+    bot.sendPhoto(chatId, qrUrl, {
+      caption: caption,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [
         [{ text: '✅ Tôi đã chuyển khoản', callback_data: 'paid_' + code }],
         [{ text: '❌ Hủy đơn', callback_data: 'cancel_' + code }]
-      ]}});
-    bot.sendMessage(chatId, 'Mã đơn: <code>' + code + '</code>', { parse_mode: 'HTML' });
+      ]}
+    });
   }
   else if (data.startsWith('paid_')){
     const code = data.replace('paid_', '');
