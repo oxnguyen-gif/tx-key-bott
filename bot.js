@@ -3,12 +3,12 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const CONFIG = {
-  TOKEN: '8668149255:AAHe4md2Meu4ZJK6u32RmKWQEVSIYqa7cak',
+  TOKEN: '8668149255:AAFsMmMVtiSdkx89ACyLl9zO9B_n1CRdnI8',
   ADMIN_USERNAME: 'Saligan2',
   ADMIN_CHAT_ID: 733030731,
   BANK: {
-    NAME: 'MBBank',
-    ACCOUNT: '90891232009',
+    NAME: 'BIDV',
+    ACCOUNT: '8869598906',
     HOLDER: 'NGUYEN VAN QUANG ANH'
   },
   PRODUCTS: [
@@ -63,7 +63,7 @@ function fmtMoney(n){ return n.toLocaleString('vi-VN') + 'đ'; }
 
 // Tạo link QR VietQR
 function genQRUrl(amount, description){
-  const bankCode = 'MB'; // MBBank
+  const bankCode = 'BIDV';
   const acc = CONFIG.BANK.ACCOUNT;
   const name = encodeURIComponent(CONFIG.BANK.HOLDER);
   const info = encodeURIComponent(description);
