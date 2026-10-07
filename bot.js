@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 const CONFIG = {
-  TOKEN: '8668149255:AAFsMmMVtiSdkx89ACyLl9zO9B_n1CRdnI8',
+  TOKEN: '8668149255:AAHe4md2Meu4ZJK6u32RmKWQEVSIYqa7cak',
   ADMIN_USERNAME: 'Saligan2',
   ADMIN_CHAT_ID: 733030731,
   BANK: {
