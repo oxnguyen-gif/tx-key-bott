@@ -1,11 +1,9 @@
 const TelegramBot = require('node-telegram-bot-api');
-const Database = require('better-sqlite3');
 const crypto = require('crypto');
+const fs = require('fs');
 
 const CONFIG = {
-  // ⬇️ DÁN TOKEN CỦA BẠN VÀO ĐÂY (thay PASTE_TOKEN_MOI_VAO_DAY)
   TOKEN: '8668149255:AAFsMmMVtiSdkx89ACyLl9zO9B_n1CRdnI8',
-
   ADMIN_USERNAME: 'Saligan2',
   ADMIN_CHAT_ID: 733030731,
   BANK: {
@@ -22,24 +20,25 @@ const CONFIG = {
     { id: 'forever', label: '👑 Vĩnh viễn', days: 0,    price: 999799 }
   ],
   KEY_SECRET: 'SKIDVN2026X',
-  KEY_PREFIX: 'TX'
+  KEY_PREFIX: 'TX',
+  DATA_FILE: './data.json'
 };
 
-const db = new Database('./bot.db');
-db.pragma('journal_mode = WAL');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS orders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT UNIQUE, user_id INTEGER, username TEXT,
-    product_id TEXT, product_label TEXT, price INTEGER, days INTEGER,
-    status TEXT DEFAULT 'pending', key_generated TEXT,
-    created_at INTEGER, paid_at INTEGER
-  );
-  CREATE TABLE IF NOT EXISTS stats (
-    id INTEGER PRIMARY KEY, total_revenue INTEGER DEFAULT 0, total_orders INTEGER DEFAULT 0
-  );
-  INSERT OR IGNORE INTO stats (id, total_revenue, total_orders) VALUES (1, 0, 0);
-`);
+let DB = { orders: [], stats: { revenue: 0, orders: 0 } };
+
+function loadDB(){
+  try {
+    if (fs.existsSync(CONFIG.DATA_FILE)){
+      DB = JSON.parse(fs.readFileSync(CONFIG.DATA_FILE, 'utf8'));
+      if (!DB.orders) DB.orders = [];
+      if (!DB.stats) DB.stats = { revenue: 0, orders: 0 };
+    }
+  } catch(e){ console.log('Load DB error:', e.message); }
+}
+function saveDB(){
+  try { fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(DB, null, 2)); } catch(e){}
+}
+loadDB();
 
 function keyHash(str){
   let h = 5381;
@@ -62,8 +61,9 @@ function genOrderCode(){
 }
 function fmtMoney(n){ return n.toLocaleString('vi-VN') + 'đ'; }
 
+console.log('🤖 Đang khởi động bot...');
 const bot = new TelegramBot(CONFIG.TOKEN, { polling: true });
-console.log('🤖 Bot đã khởi động');
+console.log('✅ Bot sẵn sàng!');
 
 bot.onText(/\/start/, (msg) => {
   const name = msg.from.first_name || 'bạn';
@@ -93,66 +93,68 @@ bot.on('callback_query', async (query) => {
     const product = CONFIG.PRODUCTS.find(p => p.id === productId);
     if (!product) return;
     const code = genOrderCode();
-    db.prepare(`INSERT INTO orders (code, user_id, username, product_id, product_label, price, days, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`)
-      .run(code, userId, username, product.id, product.label, product.price, product.days, Date.now());
+    DB.orders.push({ code, user_id: userId, username, product_id: product.id, product_label: product.label, price: product.price, days: product.days, status: 'pending', key_generated: null, created_at: Date.now() });
+    saveDB();
 
     bot.sendMessage(chatId,
-      `✅ <b>Đơn hàng đã tạo</b>\n\n📦 Sản phẩm: <b>${product.label}</b>\n💰 Số tiền: <b>${fmtMoney(product.price)}</b>\n\n━━━━━━━━━━━━━━━━━━\n<b>💳 THANH TOÁN:</b>\nNgân hàng: <b>${CONFIG.BANK.NAME}</b>\nSố TK: <code>${CONFIG.BANK.ACCOUNT}</code>\nChủ TK: <b>${CONFIG.BANK.HOLDER}</b>\nSố tiền: <b>${fmtMoney(product.price)}</b>\nNội dung CK: <code>${code}</code>\n━━━━━━━━━━━━━━━━━━\n\n⚠️ <b>CK ĐÚNG nội dung</b> để bot nhận diện.\n\nSau khi CK → bấm nút bên dưới 👇`,
+      `✅ <b>Đơn hàng đã tạo</b>\n\n📦 Sản phẩm: <b>${product.label}</b>\n💰 Số tiền: <b>${fmtMoney(product.price)}</b>\n\n━━━━━━━━━━━━━━━━━━\n<b>💳 THANH TOÁN:</b>\nNgân hàng: <b>${CONFIG.BANK.NAME}</b>\nSố TK: <code>${CONFIG.BANK.ACCOUNT}</code>\nChủ TK: <b>${CONFIG.BANK.HOLDER}</b>\nSố tiền: <b>${fmtMoney(product.price)}</b>\nNội dung CK: <code>${code}</code>\n━━━━━━━━━━━━━━━━━━\n\n⚠️ <b>CK ĐÚNG nội dung</b> để bot nhận diện.`,
       { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
         [{ text: '✅ Tôi đã chuyển khoản', callback_data: 'paid_' + code }],
         [{ text: '❌ Hủy đơn', callback_data: 'cancel_' + code }]
       ]}});
-    bot.sendMessage(chatId, 'Mã đơn: <code>' + code + '</code> (bấm để copy)', { parse_mode: 'HTML' });
+    bot.sendMessage(chatId, 'Mã đơn: <code>' + code + '</code>', { parse_mode: 'HTML' });
   }
   else if (data.startsWith('paid_')){
     const code = data.replace('paid_', '');
-    const order = db.prepare('SELECT * FROM orders WHERE code = ?').get(code);
+    const order = DB.orders.find(o => o.code === code);
     if (!order) return bot.sendMessage(chatId, '❌ Không tìm thấy đơn.');
     if (order.status === 'completed') return bot.sendMessage(chatId, '⚠️ Đã hoàn thành rồi.');
-    db.prepare('UPDATE orders SET status = ?, paid_at = ? WHERE code = ?').run('waiting', Date.now(), code);
+    order.status = 'waiting';
+    order.paid_at = Date.now();
+    saveDB();
     bot.sendMessage(chatId, `⏳ <b>Đã ghi nhận!</b>\n\nAdmin sẽ kiểm tra và gửi key trong <b>1-5 phút</b>.`, { parse_mode: 'HTML' });
 
-    if (CONFIG.ADMIN_CHAT_ID){
-      bot.sendMessage(CONFIG.ADMIN_CHAT_ID,
-        `🔔 <b>ĐƠN HÀNG MỚI</b>\n\n📦 Sản phẩm: <b>${order.product_label}</b>\n💰 Số tiền: <b>${fmtMoney(order.price)}</b>\n🆔 Mã đơn: <code>${order.code}</code>\n👤 Khách: @${order.username} (ID: ${order.user_id})\n\nKiểm tra TK → nếu có tiền → bấm ✅ XÁC NHẬN`,
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
-          [{ text: '✅ XÁC NHẬN', callback_data: 'confirm_' + code }],
-          [{ text: '❌ HỦY', callback_data: 'cancel_' + code }]
-        ]}});
-    }
+    bot.sendMessage(CONFIG.ADMIN_CHAT_ID,
+      `🔔 <b>ĐƠN HÀNG MỚI</b>\n\n📦 Sản phẩm: <b>${order.product_label}</b>\n💰 Số tiền: <b>${fmtMoney(order.price)}</b>\n🆔 Mã đơn: <code>${order.code}</code>\n👤 Khách: @${order.username}\n\nKiểm tra TK → nếu có tiền → bấm ✅ XÁC NHẬN`,
+      { parse_mode: 'HTML', reply_markup: { inline_keyboard: [
+        [{ text: '✅ XÁC NHẬN', callback_data: 'confirm_' + code }],
+        [{ text: '❌ HỦY', callback_data: 'cancel_' + code }]
+      ]}});
   }
   else if (data.startsWith('cancel_')){
     const code = data.replace('cancel_', '');
-    const order = db.prepare('SELECT * FROM orders WHERE code = ?').get(code);
+    const order = DB.orders.find(o => o.code === code);
     if (!order) return;
-    db.prepare('UPDATE orders SET status = ? WHERE code = ?').run('cancelled', code);
+    order.status = 'cancelled';
+    saveDB();
     if (String(userId) === String(CONFIG.ADMIN_CHAT_ID)){
       bot.sendMessage(order.user_id, `❌ <b>Đơn ${code} đã bị hủy.</b>`, { parse_mode: 'HTML' });
-      bot.sendMessage(chatId, '✅ Đã hủy đơn ' + code);
-    } else {
-      bot.sendMessage(chatId, '✅ Đã hủy đơn ' + code);
     }
+    bot.sendMessage(chatId, '✅ Đã hủy đơn ' + code);
   }
   else if (data.startsWith('confirm_')){
     const code = data.replace('confirm_', '');
-    const order = db.prepare('SELECT * FROM orders WHERE code = ?').get(code);
+    const order = DB.orders.find(o => o.code === code);
     if (!order) return bot.sendMessage(chatId, '❌ Không tìm thấy đơn.');
     if (order.status === 'completed') return bot.sendMessage(chatId, '⚠️ Đã xác nhận rồi.');
 
     const key = generateKey(order.days);
-    db.prepare('UPDATE orders SET status = ?, key_generated = ?, paid_at = ? WHERE code = ?').run('completed', key, Date.now(), code);
-    db.prepare('UPDATE stats SET total_revenue = total_revenue + ?, total_orders = total_orders + 1 WHERE id = 1').run(order.price);
+    order.status = 'completed';
+    order.key_generated = key;
+    DB.stats.revenue += order.price;
+    DB.stats.orders += 1;
+    saveDB();
 
     bot.sendMessage(order.user_id,
-      `🎉 <b>ĐƠN HÀNG HOÀN THÀNH</b>\n\n📦 Sản phẩm: <b>${order.product_label}</b>\n🔑 Key của bạn:\n<code>${key}</code>\n\n━━━━━━━━━━━━━━━━━━\n<b>Cách dùng:</b>\n1️⃣ Mở web: <b>https://tolmoimatto.netlify.app/</b>\n2️⃣ Nhập key vào ô kích hoạt\n3️⃣ Bấm KÍCH HOẠT → dùng tool\n\n⚠️ Đừng share key cho người khác.`,
+      `🎉 <b>ĐƠN HÀNG HOÀN THÀNH</b>\n\n📦 Sản phẩm: <b>${order.product_label}</b>\n🔑 Key của bạn:\n<code>${key}</code>\n\n━━━━━━━━━━━━━━━━━━\n<b>Cách dùng:</b>\n1️⃣ Mở web: <b>https://tolmoimatto.netlify.app/</b>\n2️⃣ Nhập key vào ô kích hoạt\n3️⃣ Bấm KÍCH HOẠT\n\n⚠️ Đừng share key cho người khác.`,
       { parse_mode: 'HTML' });
     bot.sendMessage(chatId, `✅ Đã gửi key cho khách.`, { parse_mode: 'HTML' });
   }
   else if (data === 'support'){
-    bot.sendMessage(chatId, `📞 <b>HỖ TRỢ</b>\n\nTelegram admin: @${CONFIG.ADMIN_USERNAME}\nThời gian: 8h - 23h hàng ngày`, { parse_mode: 'HTML' });
+    bot.sendMessage(chatId, `📞 <b>HỖ TRỢ</b>\n\nTelegram admin: @${CONFIG.ADMIN_USERNAME}`, { parse_mode: 'HTML' });
   }
   else if (data === 'myorders'){
-    const orders = db.prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 10').all(userId);
+    const orders = DB.orders.filter(o => o.user_id === userId).slice(-10).reverse();
     if (!orders.length) return bot.sendMessage(chatId, '📦 Bạn chưa có đơn hàng nào.');
     const text = '📦 <b>ĐƠN HÀNG CỦA BẠN</b>\n\n' + orders.map(o => {
       const status = o.status === 'completed' ? '✅ Hoàn thành' : o.status === 'waiting' ? '⏳ Chờ xác nhận' : o.status === 'cancelled' ? '❌ Đã hủy' : '⏸ Chờ CK';
@@ -167,15 +169,14 @@ bot.on('callback_query', async (query) => {
 
 bot.onText(/\/stats/, (msg) => {
   if (String(msg.from.id) !== String(CONFIG.ADMIN_CHAT_ID)) return bot.sendMessage(msg.chat.id, '❌ Không phải admin.');
-  const s = db.prepare('SELECT * FROM stats WHERE id = 1').get();
-  const pending = db.prepare("SELECT COUNT(*) n FROM orders WHERE status IN ('pending','waiting')").get().n;
-  const completed = db.prepare("SELECT COUNT(*) n FROM orders WHERE status = 'completed'").get().n;
-  bot.sendMessage(msg.chat.id, `📊 <b>THỐNG KÊ</b>\n\n💰 Doanh thu: <b>${fmtMoney(s.total_revenue)}</b>\n✅ Đơn xong: <b>${completed}</b>\n⏳ Đang chờ: <b>${pending}</b>`, { parse_mode: 'HTML' });
+  const pending = DB.orders.filter(o => o.status === 'pending' || o.status === 'waiting').length;
+  const completed = DB.orders.filter(o => o.status === 'completed').length;
+  bot.sendMessage(msg.chat.id, `📊 <b>THỐNG KÊ</b>\n\n💰 Doanh thu: <b>${fmtMoney(DB.stats.revenue)}</b>\n✅ Đơn xong: <b>${completed}</b>\n⏳ Đang chờ: <b>${pending}</b>`, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/pending/, (msg) => {
   if (String(msg.from.id) !== String(CONFIG.ADMIN_CHAT_ID)) return;
-  const orders = db.prepare("SELECT * FROM orders WHERE status IN ('pending','waiting') ORDER BY created_at DESC LIMIT 20").all();
+  const orders = DB.orders.filter(o => o.status === 'pending' || o.status === 'waiting').reverse().slice(0, 20);
   if (!orders.length) return bot.sendMessage(msg.chat.id, '✅ Không có đơn chờ.');
   orders.forEach(o => {
     bot.sendMessage(msg.chat.id, `📦 <b>${o.code}</b>\n${o.product_label} - ${fmtMoney(o.price)}\nKhách: @${o.username}`, {
@@ -185,5 +186,3 @@ bot.onText(/\/pending/, (msg) => {
     });
   });
 });
-
-console.log('✅ Bot sẵn sàng');
